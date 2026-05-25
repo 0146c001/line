@@ -40,7 +40,7 @@ if not LINE_TOKEN or not LINE_SECRET or not GEMINI_KEY:
 line_bot_api = LineBotApi(LINE_TOKEN)
 handler = WebhookHandler(LINE_SECRET)
 
-# 初始化新版 Gemini Client
+# 初始化新版 Gemini Client (對接 google-genai 套件)
 try:
     client = genai.Client(api_key=GEMINI_KEY.strip())
     print("【系統通知】新版 Gemini Client 初始化成功！")
@@ -52,10 +52,10 @@ except Exception as e:
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-# 用於暫存使用者不完整行程的上下文字典
+# 用於暫存使用者不完整行程的上下文字典 (記憶體快取)
 user_sessions = {}
 
-# --- 2. Google 日曆核心功能 ---
+# --- 2. Google 日曆核心功能 (完美對接服務帳戶) ---
 def get_calendar_service():
     """使用服務帳戶金鑰自動取得 Google Calendar 服務"""
     service_account_file = 'service_account.json'
@@ -65,9 +65,11 @@ def get_calendar_service():
                 service_account_file, scopes=SCOPES)
             return build('calendar', 'v3', credentials=creds)
         except Exception as e:
-            print(f"[錯誤] 讀取服務帳戶金鑰失败: {e}")
+            print(f"[錯誤] 讀取服務帳戶金鑰 (service_account.json) 失敗: {e}")
             return None
-    return None
+    else:
+        print("[錯誤] 找不到 service_account.json 金鑰檔案！")
+        return None
 
 def add_event_to_calendar(summary, location, date_str, time_str, description=""):
     """同步行程至 Google Calendar"""
@@ -76,11 +78,13 @@ def add_event_to_calendar(summary, location, date_str, time_str, description="")
         print("[警告] Google Calendar 服務不可用，跳過日曆寫入。")
         return None
 
+    # 組合開始與結束時間
     start_time_str = f"{date_str}T{time_str}:00"
     start_dt = datetime.datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%S")
-    end_dt = start_dt + datetime.timedelta(hours=1) 
+    end_dt = start_dt + datetime.timedelta(hours=1) # 預設行程一小時
     end_time_str = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
 
+    # 讀取指定的日曆 ID，若無則預設主日曆 'primary'
     calendar_id = os.getenv("CALENDAR_ID") or 'primary'
 
     event = {
@@ -112,13 +116,13 @@ def send_gmail(subject, content):
     password = os.environ.get("GMAIL_APP_PASSWORD") or os.getenv("GMAIL_APP_PASSWORD")
     
     if not sender or not password:
-        print("【系統錯誤】Gmail 帳號或應用程式密碼未設定。")
+        print("【系統錯誤】Gmail 帳號或應用程式 16 位密碼未設定，無法寄信。")
         return
 
     msg = MIMEText(content, "plain", "utf-8")
     msg["Subject"] = subject
     msg["From"] = sender
-    msg["To"] = sender  
+    msg["To"] = sender  # 自己寄給自己
 
     try:
         with smtplib.SMTP_SSL("://gmail.com", 465) as server:
@@ -129,7 +133,7 @@ def send_gmail(subject, content):
         print(f"【系統錯誤】Gmail 寄送失敗: {e}")
 
 def reminder_task(user_id, event_title, location, start_time_str):
-    """開始前 1.5 小時自動觸發的通知"""
+    """此函式將在行程開始前精確 1.5 小時由背景排程器自動觸發"""
     msg = f"📢 【行程提醒】您的行程「{event_title}」即將在 1.5 小時後開始！\n📍 地點：{location}\n⏰ 時間：{start_time_str}"
     try:
         line_bot_api.push_message(user_id, TextSendMessage(text=msg))
@@ -138,7 +142,7 @@ def reminder_task(user_id, event_title, location, start_time_str):
     send_gmail(f"【行程提醒】{event_title}", msg)
 
 def analyze_text_with_gemini(text):
-    """利用新版 Gemini 2.5 進行嚴格的 JSON 欄位語意解析 (升級防呆版)"""
+    """利用新版 Gemini 2.5 進行嚴格的 JSON 欄位語意解析 (強效 Bug 修復版)"""
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
     
     prompt = f"""
@@ -163,13 +167,11 @@ def analyze_text_with_gemini(text):
             model='gemini-2.5-flash',
             contents=prompt,
         )
-        
-        # 【核心 Bug 修復點】：利用正規表達式，強制只抓取大括號 {} 內部的 JSON
+        # 利用正規表達式，強制只擷取大括號 {} 內部的 JSON 資料，徹底洗掉 ```json 等雜音
         raw_text = response.text.strip()
         match = re.search(r'\{.*\}', raw_text, re.DOTALL)
         if match:
-            clean_text = match.group(0)
-            return json.loads(clean_text)
+            return json.loads(match.group(0))
         else:
             return json.loads(raw_text)
     except Exception as e:
@@ -192,29 +194,35 @@ def handle_message(event):
     user_id = event.source.user_id
     user_input = event.message.text
     
+    # A. 呼叫 AI 進行語意擷取
     extracted_data = analyze_text_with_gemini(user_input)
     
+    # B. 建立或讀取該使用者的上下文快取記憶
     if user_id not in user_sessions:
         user_sessions[user_id] = {"date": None, "time": None, "location": None, "event": None}
         
-    # 合併新舊資訊：如果新解析出來的不是 None，就覆蓋過去
+    # 合併新舊資訊：如果新解析出來的不是 None 且非空值，就保留更新
     for key in ["date", "time", "location", "event"]:
         if extracted_data.get(key) is not None and extracted_data[key] != "null" and extracted_data[key] != "":
             user_sessions[user_id][key] = extracted_data[key]
             
+    # C. 嚴格檢查四項核心變數是否齊全
     current_session = user_sessions[user_id]
     missing_fields = []
     if not current_session["date"]: missing_fields.append("【日期】")
     if not current_session["time"]: missing_fields.append("【時間】")
     if not current_session["location"]: missing_fields.append("【地點】")
-    if not current_session["event"]: missing_fields.append("【要做什麼/事件名稱】")
+    if not current_session["event"]: missing_fields.append("【要做什麼/行程名稱】")
     
+    # D. 分流邏輯判斷
     if missing_fields:
+        # 資訊不完整：回覆目前狀態並要求補登
         reply_msg = f"收到部分行程！但您還漏了：{', '.join(missing_fields)}。\n\n目前暫存：\n📅 日期: {current_session['date']}\n⏰ 時間: {current_session['time']}\n📍 地點: {current_session['location']}\n📝 行程: {current_session['event']}\n\n請直接補充告訴我缺漏的資訊！"
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_msg))
     else:
+        # 資訊齊全：正式開始執行三大自動化任務
         try:
-            # 1. 寫入日曆
+            # 任務 1：同步至 Google 日曆 (透過 Ying 共享的服務帳戶)
             add_event_to_calendar(
                 summary=current_session['event'],
                 location=current_session['location'],
@@ -222,11 +230,11 @@ def handle_message(event):
                 time_str=current_session['time']
             )
             
-            # 2. 寄送 Gmail
+            # 任務 2：發送當下的初始記錄 Gmail 通知
             success_msg = f"成功記錄行程！\n行程：{current_session['event']}\n時間：{current_session['date']} {current_session['time']}\n地點：{current_session['location']}"
             send_gmail(f"【成功記錄】{current_session['event']}", success_msg)
             
-            # 3. 設定 1.5 小時前提醒
+            # 任務 3：精確計算活動前 1.5 小時（90 分鐘），排入動態計時排程器
             event_datetime_str = f"{current_session['date']} {current_session['time']}"
             event_datetime = datetime.datetime.strptime(event_datetime_str, "%Y-%m-%d %H:%M")
             reminder_time = event_datetime - timedelta(minutes=90)
@@ -238,10 +246,13 @@ def handle_message(event):
                 args=[user_id, current_session['event'], current_session['location'], current_session['time']]
             )
             
+            # 完美的流程結束，回覆使用者
             line_bot_api.reply_message(
                 event.reply_token, 
                 TextSendMessage(text=f"✨ 太棒了！行程資訊已齊全。\n\n1. 已為您加入 Google Calendar (日曆: Ying)\n2. 已寄送 Gmail 備忘\n3. 系統將在行程開始前 1.5 小時（{reminder_time.strftime('%Y-%m-%d %H:%M')}）主動透過 LINE 推播及 Gmail 提醒您！")
             )
+            
+            # 任務徹底終結，清除該使用者的上下文暫存記憶
             del user_sessions[user_id]
             
         except Exception as e:
