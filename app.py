@@ -1,6 +1,7 @@
 import os
 import json
 import datetime
+import traceback
 from datetime import timedelta
 from flask import Flask, request, abort
 from dotenv import load_dotenv
@@ -10,7 +11,7 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 from google import genai  
-from google.genai import types  # <-- 引入結構化型態套件
+from google.genai import types  
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -33,7 +34,7 @@ LINE_SECRET = os.environ.get("LINE_CHANNEL_SECRET") or os.getenv("LINE_CHANNEL_S
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 
 if not LINE_TOKEN or not LINE_SECRET or not GEMINI_KEY:
-    print("【系統崩潰】關鍵環境變數（LINE 或 Gemini 金鑰）有缺失，請檢查 Render 後台設定！")
+    print("【系統崩潰】關鍵環境變數有缺失，請檢查 Render 後台設定！")
     exit(1)
 
 line_bot_api = LineBotApi(LINE_TOKEN)
@@ -66,7 +67,6 @@ def get_calendar_service():
 def add_event_to_calendar(summary, location, date_str, time_str, description=""):
     service = get_calendar_service()
     if not service:
-        print("[警告] Google Calendar 服務不可用。")
         return None
 
     start_time_str = f"{date_str}T{time_str}:00"
@@ -120,25 +120,23 @@ def reminder_task(user_id, event_title, location, start_time_str):
     send_gmail(f"【行程提醒】{event_title}", msg)
 
 def analyze_text_with_gemini(text):
-    """【史詩級升級】使用 Google 官方指定 Schema 結構化強制輸出 JSON"""
+    """【抓漏特化】如果出錯，強制回報最底層錯誤訊息"""
     current_date = datetime.datetime.now().strftime("%Y-%m-%d")
-    
     prompt = f"分析以下使用者的輸入並擷取行程資訊。今天日期是 {current_date}。輸入內容：{text}"
     
-    # 強制規定 Gemini 必須吐出的欄位結構與型態
     response_schema = types.Schema(
         type=types.Type.OBJECT,
         properties={
-            "date": types.Schema(type=types.Type.STRING, description="格式為 YYYY-MM-DD，若未提及填空字串"),
-            "time": types.Schema(type=types.Type.STRING, description="格式為 HH:MM，若未提及填空字串"),
-            "location": types.Schema(type=types.Type.STRING, description="地點，若未提及填空字串"),
-            "event": types.Schema(type=types.Type.STRING, description="行程要做什麼，若未提及填空字串"),
+            "date": types.Schema(type=types.Type.STRING),
+            "time": types.Schema(type=types.Type.STRING),
+            "location": types.Schema(type=types.Type.STRING),
+            "event": types.Schema(type=types.Type.STRING),
         },
         required=["date", "time", "location", "event"]
     )
     
     try:
-        # 強制指定輸出為 json 物件
+        # 這裡特別指定最穩定的 'gemini-2.5-flash' 模型
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
@@ -148,20 +146,19 @@ def analyze_text_with_gemini(text):
                 temperature=0.1
             ),
         )
-        
-        # 直接讀取，絕對不會有 Markdown 標籤汙染
         data = json.loads(response.text.strip())
         
-        # 標準化空值轉換
+        # 清洗資料
         for k in ["date", "time", "location", "event"]:
-            if not data.get(k) or data[k] == "null" or data[k] == "None":
+            if not data.get(k) or data[k] in ["null", "None", "尚未取得", ""]:
                 data[k] = None
-        return data
+        return data, None
     except Exception as e:
-        print(f"【關鍵錯誤】Gemini 結構化解析失敗: {e}")
-        return {"date": None, "time": None, "location": None, "event": None}
+        # 抓取完整的錯誤軌跡
+        error_detail = traceback.format_exc()
+        return {"date": None, "time": None, "location": None, "event": None}, f"{str(e)}\n\n{error_detail[:300]}"
 
-# --- 4. Webhook 進入點與訊息監聽中心 ---
+# --- 4. Webhook 進入點 ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -177,8 +174,15 @@ def handle_message(event):
     user_id = event.source.user_id
     user_input = event.message.text
     
-    extracted_data = analyze_text_with_gemini(user_input)
+    # 同時接收解析結果與錯誤訊息
+    extracted_data, error_msg = analyze_text_with_gemini(user_input)
     
+    # 【高能預警】如果 Gemini 噴錯，直接在 LINE 裡面舉報原因！
+    if error_msg:
+        debug_reply = f"❌ Gemini API 呼叫失敗！\n原因：{error_msg}\n\n請檢查您的 GEMINI_API_KEY 是否正確，或 Render 的金鑰前後是否有不小心複製到空白字元。"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=debug_reply))
+        return
+
     if user_id not in user_sessions:
         user_sessions[user_id] = {"date": None, "time": None, "location": None, "event": None}
         
