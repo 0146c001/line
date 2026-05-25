@@ -1,6 +1,7 @@
 import os
 import re
 import smtplib
+import json
 from email.mime.text import MIMEText
 from email.header import Header
 from datetime import datetime, timedelta
@@ -17,21 +18,39 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 # =====================================================================
-# 1. 初始化環境變數與核心套件
+# 1. 初始化環境變數與核心套件（已安全帶入您的專屬欄位與備用值）
 # =====================================================================
 app = Flask(__name__)
 
-# 完全對齊您 Render 後台的變數名稱
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('lmagqMKGkhEbJqL7sZSrhqF5kWyophFwwWoJKsmvWx3UwfIry3hiqJU2RU4J8YSL1oyx6dVS288efjvePsuBPnMvetNSa+AriQaFOjMK8s6g2+ua0aBWymZpsRjd6vBnx6PX5RssYjvzUov/ufuO0QdB04t89/1O/w1cDnyilFU=')
-LINE_CHANNEL_SECRET = os.environ.get('1b0aac2458a142982ae8240394e307e2')
-GEMINI_API_KEY = os.environ.get('AIzaSyDkzb0CVRNGRxm1h4TkdJ-apYH8PFJ1VvQ')
-GMAIL_USER = os.environ.get('karen1023440321@gmail.com')
-GMAIL_PASSWORD = os.environ.get('doqf fsmx wknk bvvi')  # 已對齊您的 GMAIL_APP_PASSWORD
+# 正確讀取 Render 環境變數，並將您提供的內容作為預設備用值
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get(
+    'LINE_CHANNEL_ACCESS_TOKEN', 
+    'lmagqMKGkhEbJqL7sZSrhqF5kWyophFwwWoJKsmvWx3UwfIry3hiqJU2RU4J8YSL1oyx6dVS288efjvePsuBPnMvetNSa+AriQaFOjMK8s6g2+ua0aBWymZpsRjd6vBnx6PX5RssYjvzUov/ufuO0QdB04t89/1O/w1cDnyilFU='
+)
 
+LINE_CHANNEL_SECRET = os.environ.get(
+    'LINE_CHANNEL_SECRET', 
+    '1b0aac2458a142982ae8240394e307e2'
+)
+
+GEMINI_API_KEY = os.environ.get(
+    'GEMINI_API_KEY', 
+    'AIzaSyDkzb0CVRNGRxm1h4TkdJ-apYH8PFJ1VvQ'
+)
+
+GMAIL_USER = os.environ.get(
+    'GMAIL_USER', 
+    'karen1023440321@gmail.com'
+)
+
+GMAIL_PASSWORD = os.environ.get(
+    'GMAIL_APP_PASSWORD', 
+    'doqf fsmx wknk bvvi'
+)
+
+# 啟動 API 客戶端
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# 初始化 Gemini 客戶端
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 # =====================================================================
@@ -57,7 +76,8 @@ def send_gmail(to_email, subject, body):
         msg['To'] = Header(to_email, 'utf-8')
         msg['Subject'] = Header(subject, 'utf-8')
 
-        server = smtplib.SMTP('://gmail.com', 587)  # 修正：標準 TLS 埠號為 587
+        # 使用標準的 587 連接埠進行 TLS 加密傳輸
+        server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(GMAIL_USER, GMAIL_PASSWORD)
         server.sendmail(GMAIL_USER, [to_email], msg.as_string())
@@ -97,7 +117,7 @@ def extract_info_via_gemini(user_text):
     
     try:
         response = gemini_client.models.generate_content(
-            model='gemini-2.5-flash',  # 使用最新穩定的大模型
+            model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -105,8 +125,6 @@ def extract_info_via_gemini(user_text):
                 temperature=0.1
             ),
         )
-        # 解析 JSON 回傳內容
-        import json
         result = json.loads(response.text)
         return result.get('date'), result.get('time'), result.get('title'), result.get('location')
     except Exception as e:
@@ -152,15 +170,10 @@ def handle_message(event):
 
     start_time_str = event_datetime.strftime('%Y-%m-%d %H:%M:%S')
 
-    # 步驟 3：寫入 Google Calendar (預留接口)
-    calendar_success = False
-    try:
-        # TODO: 貼上您舊有的 Google 行事曆 API 呼叫代碼
-        calendar_success = True 
-    except Exception as e:
-        print(f"【❌ 系統錯誤】寫入 Google Calendar 失敗: {e}")
+    # 步驟 3：寫入 Google Calendar (接口預留，目前預設為 True)
+    calendar_success = True
 
-    # 步驟 4：發送 Gmail 登記通知信 (自動發給您自己)
+    # 步驟 4：發送 Gmail 登記通知信 (自動發給自己)
     gmail_success = False
     mail_body = f"📢 【行程同步成功】\n您的行程「{event_title}」已成功登記。\n📍 地點：{location}\n⏰ 時間：{start_time_str}"
     
@@ -177,3 +190,4 @@ def handle_message(event):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+ㄒ
