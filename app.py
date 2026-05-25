@@ -1,3 +1,4 @@
+from google_calendar import add_event_to_calendar
 import os
 import json
 from datetime import datetime, timedelta
