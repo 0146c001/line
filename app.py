@@ -110,14 +110,23 @@ def send_gmail(subject, content):
             server.sendmail(sender, [sender], msg.as_string())
     except Exception as e:
         print(f"【系統錯誤】Gmail 寄送失敗: {e}")
-
+        
 def reminder_task(user_id, event_title, location, start_time_str):
+    # 建議：未來可將 1.5 小時改為變數傳入
     msg = f"📢 【行程提醒】您的行程「{event_title}」即將在 1.5 小時後開始！\n📍 地點：{location}\n⏰ 時間：{start_time_str}"
+    
+    # 1. 處理 LINE 推播
     try:
         line_bot_api.push_message(user_id, TextSendMessage(text=msg))
     except Exception as e:
         print(f"【系統錯誤】LINE 推播提醒失敗: {e}")
-    send_gmail(f"【行程提醒】{event_title}", msg)
+        
+    # 2. 處理 Gmail 發送（獨立異常處理，避免互相干擾）
+    try:
+        send_gmail(f"【行程提醒】{event_title}", msg)
+    except Exception as e:
+        print(f"【系統錯誤】Gmail 發送失敗: {e}")
+
 
 def analyze_text_with_gemini(text):
     """【抓漏特化】如果出錯，強制回報最底層錯誤訊息"""
